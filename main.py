@@ -46,6 +46,7 @@ class Corpus:
         self.sentences = []
         self.num_of_words = 0
         self.sentences_lengths = []
+        self.chunks = []
 
     def add_xml_file_to_corpus(self, file_name: str):
         """
@@ -94,6 +95,14 @@ class Corpus:
             tokens_list.extend([tok.value.lower() for tok in sen.tokens])
         return tokens_list
 
+    def calculate_chunks(self):
+        chunks = []
+        sentences_counter = 0
+        while sentences_counter <= len(self.sentences) + 10:
+            chunks.append(self.sentences[sentences_counter: sentences_counter + 10])
+            sentences_counter += 10
+        self.chunks = chunks
+
 
 # Implement a "Classify" class, that will be built using a corpus of type "Corpus" (thus, you will need to
 # connect it in any way you want to the "Corpus" class). Make sure that the class contains the relevant fields for
@@ -120,10 +129,11 @@ def main():
     xml_files_names = os.listdir(xml_dir)
     for file in xml_files_names[:min(len(xml_files_names), 1000)]:
         c.add_xml_file_to_corpus(os.path.join(xml_dir, file))
-
+    c.calculate_chunks()
     print('XML files Additions - Done!')
 
     # 2. Create a classification object based on the class implemented above.
+
     # 3. Classify the chunks of text from the corpus as described in the instructions.
     # 4. Print onto the output file the results from the second task in the wanted format.
 
