@@ -214,10 +214,8 @@ class Classify:
 
 def main():
     print('Program started')
-    # xml_dir = argv[1]  # directory containing xml files from the BNC corpus, full path
-    xml_dir = os.path.join(os.getcwd(), 'XML_files')
-    # output_file = argv[2]  # output file name, full path
-    output_file = os.path.join(os.getcwd(), 'output.txt')
+    xml_dir = argv[1]  # directory containing xml files from the BNC corpus, full path
+    output_file = argv[2]  # output file name, full path
 
     # 1. Create a corpus from the file in the given directory (up to 1000 XML files from the BNC)
     print('Corpus Building - In Progress...')
@@ -247,9 +245,8 @@ def main():
 
     # 4. Print onto the output file the results from the second task in the wanted format.
     print(f'Writing output to {output_file}')
-    output_file = open(output_file, 'w', encoding='utf8')
-    output_file.write(output_str)
-    output_file.close()
+    with open(output_file, 'w', encoding='utf8') as output_file:
+        output_file.write(output_str)
     print(f'Program ended.')
 
 
