@@ -4,11 +4,9 @@ from sys import argv
 import xml.etree.ElementTree as ET
 import gender_guesser.detector as gender
 import numpy as np
-from sklearn.feature_extraction.text import CountVectorizer
-from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
 from sklearn.neighbors import KNeighborsClassifier
-from sklearn.model_selection import cross_val_score
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import cross_val_score, train_test_split
 from sklearn.metrics import classification_report
 from collections import Counter
 from enum import Enum
@@ -145,12 +143,12 @@ class Classify:
         if self.male_chunks_size > self.female_chunks_size:
             self.male_chunks = random.sample(self.male_chunks, target_num_of_samples)
             self.male_chunks_size = target_num_of_samples
-
         else:
             self.female_chunks = random.sample(self.female_chunks, target_num_of_samples)
             self.female_chunks_size = target_num_of_samples
 
     def classify(self, vector_method):
+        # get train data and labels
         chunks = Chunks(self.male_chunks + self.female_chunks)
         train_data = self.get_data_by_BoW(chunks) if vector_method == 'BoW' else \
             self.get_data_by_personal_vector(chunks)
@@ -158,14 +156,15 @@ class Classify:
         train_labels = np.array([c.overall_gender.value for c in chunks.chunks])
         target_names = ['Male', 'Female']
 
+        # model w 10-fold cross-validation
         neigh_cross_val = KNeighborsClassifier()
         neigh_cross_val.fit(train_data, train_labels)
         cross_val_score_list = cross_val_score(neigh_cross_val, train_data, train_labels, cv=10)
-
         # todo all data?
         cross_val_predicted = neigh_cross_val.predict(train_data)
         cross_val_report = classification_report(train_labels, cross_val_predicted, target_names=target_names)
 
+        # model w 70:30 split validation
         neigh_split_val = KNeighborsClassifier()
         X_train, X_test, y_train, y_test = train_test_split(train_data, train_labels, test_size=0.3)
         neigh_split_val.fit(X_train, y_train)
@@ -199,10 +198,8 @@ class Classify:
 
         # give each word a score
         scores_dict = {}
-        for (male_word, male_occ), (female_word, female_occ) in zip(male_sorted_counter.items(),
-                                                                    female_sorted_counter.items()):
-            scores_dict[male_word] = abs(male_occ - female_sorted_counter.get(male_word, 0))
-            scores_dict[female_word] = abs(female_occ - male_sorted_counter.get(female_word, 0))
+        for word in set(male_words + female_words):
+            scores_dict[word] = abs(male_sorted_counter.get(word, 0) - female_sorted_counter.get(word, 0))
 
         # pick the top words
         words_sorted_by_importance = [k for k, v in sorted(scores_dict.items(), key=lambda item: item[1], reverse=True)]
