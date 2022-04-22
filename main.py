@@ -1,4 +1,5 @@
 import os
+import random
 from sys import argv
 import xml.etree.ElementTree as ET
 import gender_guesser.detector as gender
@@ -39,6 +40,13 @@ class Sentence:
         self.index = index  # starts with 1
         self.authors_list = authors_list
         self.author_gender = author_gender
+
+
+class Chunk:
+    def __init__(self, sentences):
+        self.sentences = sentences
+        all_genders = [sen.author_gender for sen in sentences]
+        self.overall_gender = all_genders[0] if len(set(all_genders)) == 1 else Gender.Unknown
 
 
 class Corpus:
@@ -99,7 +107,8 @@ class Corpus:
         chunks = []
         sentences_counter = 0
         while sentences_counter <= len(self.sentences) + 10:
-            chunks.append(self.sentences[sentences_counter: sentences_counter + 10])
+            sentences = self.sentences[sentences_counter: sentences_counter + 10]
+            chunks.append(Chunk(sentences))
             sentences_counter += 10
         self.chunks = chunks
 
@@ -111,8 +120,25 @@ class Corpus:
 
 class Classify:
 
-    def __init__(self):
-        return
+    def __init__(self, corpus):
+        self.corpus = corpus
+        self.male_chunks = [chunk for chunk in self.corpus.chunks if chunk.overall_gender == Gender.Male]
+        self.male_chunks_size = len(self.male_chunks)
+        self.female_chunks = [chunk for chunk in self.corpus.chunks if chunk.overall_gender == Gender.Female]
+        self.female_chunks_size = len(self.female_chunks)
+
+    def get_male_female_chunks_count(self):
+        return self.male_chunks_size, self.female_chunks_size
+
+    def even_out_classes(self):
+        target_num_of_samples = min(self.male_chunks_size, self.female_chunks_size)
+        if self.male_chunks_size > self.female_chunks_size:
+            self.male_chunks = random.sample(self.male_chunks, target_num_of_samples)
+            self.male_chunks_size = target_num_of_samples
+
+        else:
+            self.female_chunks = random.sample(self.female_chunks, target_num_of_samples)
+            self.female_chunks_size = target_num_of_samples
 
 
 def main():
@@ -123,19 +149,29 @@ def main():
     output_file = os.path.join(os.getcwd(), 'output.txt')
 
     # 1. Create a corpus from the file in the given directory (up to 1000 XML files from the BNC)
-    print('Initializing Corpus')
+    print('Corpus Building - In Progress...')
     c = Corpus()
-    print('XML files Additions - In Progress...')
     xml_files_names = os.listdir(xml_dir)
     for file in xml_files_names[:min(len(xml_files_names), 1000)]:
         c.add_xml_file_to_corpus(os.path.join(xml_dir, file))
     c.calculate_chunks()
-    print('XML files Additions - Done!')
+    print('Corpus Building - Done!')
 
     # 2. Create a classification object based on the class implemented above.
+    classify = Classify(c)
+    male_count, female_count = classify.get_male_female_chunks_count()
+    output_str = f'Before Down-sampling:\nFemale: {female_count} Male {male_count}\n\n'
+    classify.even_out_classes()
+    male_count, female_count = classify.get_male_female_chunks_count()
+    output_str += f'After Down-sampling:\nFemale: {female_count} Male {male_count}\n\n'
 
     # 3. Classify the chunks of text from the corpus as described in the instructions.
     # 4. Print onto the output file the results from the second task in the wanted format.
+    print(f'Writing output to {output_file}')
+    output_file = open(output_file, 'w', encoding='utf8')
+    output_file.write(output_str)
+    output_file.close()
+    print(f'Program ended.')
 
 
 if __name__ == '__main__':
