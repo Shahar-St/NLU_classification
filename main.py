@@ -3,13 +3,19 @@ import random
 from sys import argv
 import xml.etree.ElementTree as ET
 import gender_guesser.detector as gender
+import numpy as np
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.model_selection import cross_val_score
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report
+from collections import Counter
 from enum import Enum
+import itertools
 
 
 class Token:
-    SENTENCE_START_TOK = '<s>'
-    SENTENCE_END_TOK = '</s>'
-
     def __init__(self, token_type, value, c5=None, hw=None, pos=None):
         self.token_type = token_type  # w (word), c (punctuation marks), s (beg/end of sentence)
         self.value = value
@@ -48,12 +54,28 @@ class Chunk:
         all_genders = [sen.author_gender for sen in sentences]
         self.overall_gender = all_genders[0] if len(set(all_genders)) == 1 else Gender.Unknown
 
+    def get_all_words(self):
+        tokens_lists = [sen.tokens for sen in self.sentences]
+        tokens = list(itertools.chain.from_iterable(tokens_lists))
+        words = [tok.value for tok in tokens]
+        return words
+
+
+class Chunks:
+    def __init__(self, chunks):
+        self.chunks = chunks
+
+    def __getitem__(self, item):
+        sentences = self.chunks[item].sentences
+        tokens_lists = [sen.tokens for sen in sentences]
+        tokens = list(itertools.chain.from_iterable(tokens_lists))
+        words = [tok.value for tok in tokens]
+        return ' '.join(words)
+
 
 class Corpus:
     def __init__(self):
         self.sentences = []
-        self.num_of_words = 0
-        self.sentences_lengths = []
         self.chunks = []
 
     def add_xml_file_to_corpus(self, file_name: str):
@@ -73,9 +95,7 @@ class Corpus:
 
         # iterate over all sentences in the file and extract the tokens
         for sentence in tree.iter(tag='s'):
-            # Adding sentence start token at the beginning of the sentence
-            tokens = [Token('s', Token.SENTENCE_START_TOK)]
-            # tokens = []
+            tokens = []
             for word in sentence:
                 if word.tag in ('w', 'c'):
                     att = word.attrib
@@ -87,14 +107,9 @@ class Corpus:
                         value=word.text.strip()
                     )
                     tokens.append(new_token)
-                    self.num_of_words += 1
 
-            # Adding sentence end token at the end of the sentence
-            tokens.append(Token('s', Token.SENTENCE_END_TOK))
             new_sentence = Sentence(tokens, int(sentence.attrib['n']), authors, author_gender)
             self.sentences.append(new_sentence)
-            # Saving the sentence length. Will be used in the random sentence generation
-            self.sentences_lengths.append(len(sentence))
 
     def get_tokens(self):
         # get a list of all tokens in their lower case form
@@ -111,11 +126,6 @@ class Corpus:
             chunks.append(Chunk(sentences))
             sentences_counter += 10
         self.chunks = chunks
-
-
-# Implement a "Classify" class, that will be built using a corpus of type "Corpus" (thus, you will need to
-# connect it in any way you want to the "Corpus" class). Make sure that the class contains the relevant fields for
-# classification, and the methods in order to complete the tasks:
 
 
 class Classify:
@@ -139,6 +149,70 @@ class Classify:
         else:
             self.female_chunks = random.sample(self.female_chunks, target_num_of_samples)
             self.female_chunks_size = target_num_of_samples
+
+    def classify(self, vector_method):
+        chunks = Chunks(self.male_chunks + self.female_chunks)
+        train_data = self.get_data_by_BoW(chunks) if vector_method == 'BoW' else \
+            self.get_data_by_personal_vector(chunks)
+
+        train_labels = np.array([c.overall_gender.value for c in chunks.chunks])
+        target_names = ['Male', 'Female']
+
+        neigh_cross_val = KNeighborsClassifier()
+        neigh_cross_val.fit(train_data, train_labels)
+        cross_val_score_list = cross_val_score(neigh_cross_val, train_data, train_labels, cv=10)
+
+        # todo all data?
+        cross_val_predicted = neigh_cross_val.predict(train_data)
+        cross_val_report = classification_report(train_labels, cross_val_predicted, target_names=target_names)
+
+        neigh_split_val = KNeighborsClassifier()
+        X_train, X_test, y_train, y_test = train_test_split(train_data, train_labels, test_size=0.3)
+        neigh_split_val.fit(X_train, y_train)
+        reg_val_score = neigh_split_val.score(X_test, y_test)
+
+        reg_val_predicted = neigh_split_val.predict(train_data)
+        reg_val_report = classification_report(train_labels, reg_val_predicted, target_names=target_names)
+
+        return cross_val_score_list, cross_val_report, reg_val_score, reg_val_report
+
+    @staticmethod
+    def get_data_by_BoW(chunks):
+        vectorizer = TfidfVectorizer()
+        data = vectorizer.fit_transform(chunks)
+        return data
+
+    def get_data_by_personal_vector(self, chunks):
+        # get top occur words for each gender
+        male_words = []
+        female_words = []
+        for male_chunk, female_chunk in zip(self.male_chunks, self.female_chunks):
+            male_words.extend(male_chunk.get_all_words())
+            female_words.extend(female_chunk.get_all_words())
+        male_sorted_counter = \
+            {k: v for k, v in sorted(Counter(male_words).items(), key=lambda item: item[1], reverse=True)}
+        female_sorted_counter = \
+            {k: v for k, v in sorted(Counter(female_words).items(), key=lambda item: item[1], reverse=True)}
+        counter_size = min(len(male_sorted_counter), len(female_sorted_counter))
+        male_sorted_counter = dict(itertools.islice(male_sorted_counter.items(), counter_size))
+        female_sorted_counter = dict(itertools.islice(female_sorted_counter.items(), counter_size))
+
+        # give each word a score
+        scores_dict = {}
+        for (male_word, male_occ), (female_word, female_occ) in zip(male_sorted_counter.items(),
+                                                                    female_sorted_counter.items()):
+            scores_dict[male_word] = abs(male_occ - female_sorted_counter.get(male_word, 0))
+            scores_dict[female_word] = abs(female_occ - male_sorted_counter.get(female_word, 0))
+
+        # pick the top words
+        words_sorted_by_importance = [k for k, v in sorted(scores_dict.items(), key=lambda item: item[1], reverse=True)]
+        voc_size = min(len(words_sorted_by_importance), 1000)
+        vocab = np.array(words_sorted_by_importance[:voc_size])
+
+        vectorizer = CountVectorizer()
+        vectorizer.fit_transform(vocab)
+        data = vectorizer.transform(chunks)
+        return data
 
 
 def main():
@@ -166,6 +240,14 @@ def main():
     output_str += f'After Down-sampling:\nFemale: {female_count} Male {male_count}\n\n'
 
     # 3. Classify the chunks of text from the corpus as described in the instructions.
+    vectors_methods = ['BoW', 'Custom Feature Vector']
+    for vector_method in vectors_methods:
+        output_str += f'== {vector_method} Classification ==\n'
+        cross_val_score_list, cross_val_report, reg_val_score, reg_val_report = classify.classify(vector_method)
+        # todo which one to take?
+        # todo what to do with the val score
+        output_str += f'Cross Validation Accuracy: {cross_val_score_list[-1] * 100:.3f}% \n{cross_val_report}\n\n'
+
     # 4. Print onto the output file the results from the second task in the wanted format.
     print(f'Writing output to {output_file}')
     output_file = open(output_file, 'w', encoding='utf8')
