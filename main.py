@@ -1,25 +1,21 @@
+import itertools
 import os
-import random
-from sys import argv
+import time
 import xml.etree.ElementTree as ET
+from enum import Enum
+from sys import argv
+
 import gender_guesser.detector as gender
 import numpy as np
 from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
-from sklearn.neighbors import KNeighborsClassifier
-from sklearn.model_selection import cross_val_score, train_test_split
 from sklearn.metrics import classification_report
-from collections import Counter
-from enum import Enum
-import itertools
+from sklearn.model_selection import cross_val_score, train_test_split
+from sklearn.neighbors import KNeighborsClassifier
 
 
 class Token:
-    def __init__(self, token_type, value, c5=None, hw=None, pos=None):
-        self.token_type = token_type  # w (word), c (punctuation marks), s (beg/end of sentence)
+    def __init__(self, value):
         self.value = value
-        self.c5 = c5  # The C5 tag
-        self.hw = hw  # headword
-        self.pos = pos  # part of speech, derived from the c5 tag
 
 
 class Gender(Enum):
@@ -38,10 +34,8 @@ class Gender(Enum):
 
 
 class Sentence:
-    def __init__(self, tokens_array, index: int, authors_list, author_gender: Gender):
+    def __init__(self, tokens_array, authors_list, author_gender: Gender):
         self.tokens = tokens_array
-        self.tokens_num = len(tokens_array)
-        self.index = index  # starts with 1
         self.authors_list = authors_list
         self.author_gender = author_gender
 
@@ -66,8 +60,8 @@ class Chunks:
     def __getitem__(self, item):
         sentences = self.chunks[item].sentences
         tokens_lists = [sen.tokens for sen in sentences]
-        tokens = list(itertools.chain.from_iterable(tokens_lists))
-        words = [tok.value for tok in tokens]
+        tokens = np.concatenate(tokens_lists)
+        words = np.array([tok.value for tok in tokens])
         return ' '.join(words)
 
 
@@ -89,32 +83,25 @@ class Corpus:
         for author in tree.iter(tag='author'):
             authors.append(author.text)
 
-        author_gender = Gender.get_gender(authors[0].split(',')[1].strip()) if len(authors) == 1 else Gender.Unknown
+        if len(authors) == 1 and len(authors[0].split(',')) == 2:
+            author_gender = Gender.get_gender(authors[0].split(',')[1].strip())
+        else:
+            author_gender = Gender.Unknown
 
         # iterate over all sentences in the file and extract the tokens
         for sentence in tree.iter(tag='s'):
             tokens = []
             for word in sentence:
-                if word.tag in ('w', 'c'):
-                    att = word.attrib
-                    new_token = Token(
-                        token_type=word.tag,
-                        c5=att['c5'],
-                        hw=att.get('hw'),
-                        pos=att.get('pos'),
-                        value=word.text.strip()
-                    )
+                if word.tag in ('w', 'c') and isinstance(word.text, str):
+                    new_token = Token(value=word.text.strip())
                     tokens.append(new_token)
 
-            new_sentence = Sentence(tokens, int(sentence.attrib['n']), authors, author_gender)
+            tokens = np.array(tokens)
+            new_sentence = Sentence(tokens, authors, author_gender)
             self.sentences.append(new_sentence)
 
-    def get_tokens(self):
-        # get a list of all tokens in their lower case form
-        tokens_list = []
-        for sen in self.sentences:
-            tokens_list.extend([tok.value.lower() for tok in sen.tokens])
-        return tokens_list
+    def set_sentences_to_np(self):
+        self.sentences = np.array(self.sentences)
 
     def calculate_chunks(self):
         chunks = []
@@ -123,17 +110,17 @@ class Corpus:
             sentences = self.sentences[sentences_counter: sentences_counter + 10]
             chunks.append(Chunk(sentences))
             sentences_counter += 10
-        self.chunks = chunks
+        self.chunks = np.array(chunks)
 
 
 class Classify:
 
     def __init__(self, corpus):
         self.corpus = corpus
-        self.male_chunks = [chunk for chunk in self.corpus.chunks if chunk.overall_gender == Gender.Male]
-        self.male_chunks_size = len(self.male_chunks)
-        self.female_chunks = [chunk for chunk in self.corpus.chunks if chunk.overall_gender == Gender.Female]
-        self.female_chunks_size = len(self.female_chunks)
+        self.male_chunks = np.array([chunk for chunk in self.corpus.chunks if chunk.overall_gender == Gender.Male])
+        self.male_chunks_size = self.male_chunks.size
+        self.female_chunks = np.array([chunk for chunk in self.corpus.chunks if chunk.overall_gender == Gender.Female])
+        self.female_chunks_size = self.female_chunks.size
 
     def get_male_female_chunks_count(self):
         return self.male_chunks_size, self.female_chunks_size
@@ -141,15 +128,15 @@ class Classify:
     def even_out_classes(self):
         target_num_of_samples = min(self.male_chunks_size, self.female_chunks_size)
         if self.male_chunks_size > self.female_chunks_size:
-            self.male_chunks = random.sample(self.male_chunks, target_num_of_samples)
+            self.male_chunks = np.random.choice(self.male_chunks, size=target_num_of_samples, replace=False)
             self.male_chunks_size = target_num_of_samples
         else:
-            self.female_chunks = random.sample(self.female_chunks, target_num_of_samples)
+            self.female_chunks = np.random.choice(self.female_chunks, size=target_num_of_samples, replace=False)
             self.female_chunks_size = target_num_of_samples
 
     def classify(self, vector_method):
         # get train data and labels
-        chunks = Chunks(self.male_chunks + self.female_chunks)
+        chunks = Chunks(np.concatenate([self.male_chunks, self.female_chunks]))
         train_data = self.get_data_by_BoW(chunks) if vector_method == 'BoW' else \
             self.get_data_by_personal_vector(chunks)
 
@@ -188,22 +175,32 @@ class Classify:
         for male_chunk, female_chunk in zip(self.male_chunks, self.female_chunks):
             male_words.extend(male_chunk.get_all_words())
             female_words.extend(female_chunk.get_all_words())
+
+        male_words = np.array(male_words)
+        female_words = np.array(female_words)
+
+        male_unique, male_counts = np.unique(male_words, return_counts=True)
+        female_unique, female_counts = np.unique(female_words, return_counts=True)
+        counter_size = min(male_unique.size, female_unique.size)
+
         male_sorted_counter = \
-            {k: v for k, v in sorted(Counter(male_words).items(), key=lambda item: item[1], reverse=True)}
+            {k: v for k, v in
+             sorted(dict(zip(male_unique, male_counts)).items(), key=lambda item: item[1], reverse=True)}
         female_sorted_counter = \
-            {k: v for k, v in sorted(Counter(female_words).items(), key=lambda item: item[1], reverse=True)}
-        counter_size = min(len(male_sorted_counter), len(female_sorted_counter))
+            {k: v for k, v in
+             sorted(dict(zip(female_unique, female_counts)).items(), key=lambda item: item[1], reverse=True)}
         male_sorted_counter = dict(itertools.islice(male_sorted_counter.items(), counter_size))
         female_sorted_counter = dict(itertools.islice(female_sorted_counter.items(), counter_size))
 
         # give each word a score
         scores_dict = {}
-        for word in set(male_words + female_words):
+        for word in np.unique(np.concatenate([male_words, female_words])):
             scores_dict[word] = abs(male_sorted_counter.get(word, 0) - female_sorted_counter.get(word, 0))
 
         # pick the top words
-        words_sorted_by_importance = [k for k, v in sorted(scores_dict.items(), key=lambda item: item[1], reverse=True)]
-        voc_size = min(len(words_sorted_by_importance), 1000)
+        words_sorted_by_importance = np.array(
+            [k for k, v in sorted(scores_dict.items(), key=lambda item: item[1], reverse=True)])
+        voc_size = min(words_sorted_by_importance.size, 1000)
         vocab = np.array(words_sorted_by_importance[:voc_size])
 
         vectorizer = CountVectorizer()
@@ -214,27 +211,32 @@ class Classify:
 
 def main():
     print('Program started')
+    start_time = time.time()
     xml_dir = argv[1]  # directory containing xml files from the BNC corpus, full path
     output_file = argv[2]  # output file name, full path
 
     # 1. Create a corpus from the file in the given directory (up to 1000 XML files from the BNC)
     print('Corpus Building - In Progress...')
-    c = Corpus()
+    corpus = Corpus()
     xml_files_names = os.listdir(xml_dir)
     for file in xml_files_names[:min(len(xml_files_names), 1000)]:
-        c.add_xml_file_to_corpus(os.path.join(xml_dir, file))
-    c.calculate_chunks()
+        corpus.add_xml_file_to_corpus(os.path.join(xml_dir, file))
+    corpus.set_sentences_to_np()
+    corpus.calculate_chunks()
     print('Corpus Building - Done!')
 
     # 2. Create a classification object based on the class implemented above.
-    classify = Classify(c)
+    print('classify Building - In Progress...')
+    classify = Classify(corpus)
     male_count, female_count = classify.get_male_female_chunks_count()
     output_str = f'Before Down-sampling:\nFemale: {female_count} Male {male_count}\n\n'
     classify.even_out_classes()
     male_count, female_count = classify.get_male_female_chunks_count()
     output_str += f'After Down-sampling:\nFemale: {female_count} Male {male_count}\n\n'
+    print('classify Building - Done!')
 
     # 3. Classify the chunks of text from the corpus as described in the instructions.
+    print('Classification - In Progress...')
     vectors_methods = ['BoW', 'Custom Feature Vector']
     for vector_method in vectors_methods:
         output_str += f'== {vector_method} Classification ==\n'
@@ -242,12 +244,14 @@ def main():
         # todo which one to take?
         # todo what to do with the val score
         output_str += f'Cross Validation Accuracy: {cross_val_score_list[-1] * 100:.3f}% \n{cross_val_report}\n\n'
+    print('Classification - Done!')
 
     # 4. Print onto the output file the results from the second task in the wanted format.
     print(f'Writing output to {output_file}')
     with open(output_file, 'w', encoding='utf8') as output_file:
         output_file.write(output_str)
     print(f'Program ended.')
+    print(f'Run time: {(time.time() - start_time):.2f} seconds.')
 
 
 if __name__ == '__main__':
