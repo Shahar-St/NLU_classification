@@ -7,7 +7,8 @@ from sys import argv
 
 import gender_guesser.detector as gender
 import numpy as np
-from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
+from scipy.sparse import csr_matrix
+from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics import classification_report
 from sklearn.model_selection import cross_val_score, train_test_split
 from sklearn.neighbors import KNeighborsClassifier
@@ -56,6 +57,7 @@ class Chunk:
 class Chunks:
     def __init__(self, chunks):
         self.chunks = chunks
+        self.size = chunks.size
 
     def __getitem__(self, item):
         sentences = self.chunks[item].sentences
@@ -136,6 +138,7 @@ class Classify:
 
     def classify(self, vector_method):
         # get train data and labels
+        print(f'Running classify with method = {vector_method}')
         chunks = Chunks(np.concatenate([self.male_chunks, self.female_chunks]))
         train_data = self.get_data_by_BoW(chunks) if vector_method == 'BoW' else \
             self.get_data_by_personal_vector(chunks)
@@ -144,19 +147,22 @@ class Classify:
         target_names = ['Male', 'Female']
 
         # model w 10-fold cross-validation
+        print('Running model with Cross validation')
         neigh_cross_val = KNeighborsClassifier()
         neigh_cross_val.fit(train_data, train_labels)
         cross_val_score_list = cross_val_score(neigh_cross_val, train_data, train_labels, cv=10)
         # todo all data?
+        print('Generating summery')
         cross_val_predicted = neigh_cross_val.predict(train_data)
         cross_val_report = classification_report(train_labels, cross_val_predicted, target_names=target_names)
 
         # model w 70:30 split validation
+        print('Running model with regular split')
         neigh_split_val = KNeighborsClassifier()
         X_train, X_test, y_train, y_test = train_test_split(train_data, train_labels, test_size=0.3)
         neigh_split_val.fit(X_train, y_train)
         reg_val_score = neigh_split_val.score(X_test, y_test)
-
+        print('Generating summery')
         reg_val_predicted = neigh_split_val.predict(train_data)
         reg_val_report = classification_report(train_labels, reg_val_predicted, target_names=target_names)
 
@@ -203,9 +209,17 @@ class Classify:
         voc_size = min(words_sorted_by_importance.size, 1000)
         vocab = np.array(words_sorted_by_importance[:voc_size])
 
-        vectorizer = CountVectorizer()
-        vectorizer.fit_transform(vocab)
-        data = vectorizer.transform(chunks)
+        data = []
+        chunk_num = 0
+        while chunk_num < chunks.size:
+            chunk_str = chunks[chunk_num]
+            chunk_vec = []
+            for i, word in np.ndenumerate(vocab):
+                chunk_vec.append(chunk_str.count(word))
+            data.append(np.array(chunk_vec))
+            chunk_num += 1
+        data = csr_matrix(data)
+
         return data
 
 
@@ -218,7 +232,7 @@ def main():
     # 1. Create a corpus from the file in the given directory (up to 1000 XML files from the BNC)
     print('Corpus Building - In Progress...')
     corpus = Corpus()
-    xml_files_names = os.listdir(xml_dir)
+    xml_files_names = os.listdir(xml_dir)  # [:48]
     for file in xml_files_names[:min(len(xml_files_names), 1000)]:
         corpus.add_xml_file_to_corpus(os.path.join(xml_dir, file))
     corpus.set_sentences_to_np()
@@ -251,7 +265,8 @@ def main():
     with open(output_file, 'w', encoding='utf8') as output_file:
         output_file.write(output_str)
     print(f'Program ended.')
-    print(f'Run time: {(time.time() - start_time):.2f} seconds.')
+    minutes, seconds = divmod(time.time() - start_time, 60)
+    print(f'Run time: {int(minutes)}:{int(seconds)} minutes.')
 
 
 if __name__ == '__main__':
