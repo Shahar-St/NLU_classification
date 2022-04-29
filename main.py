@@ -1,9 +1,9 @@
 import itertools
 import os
-import time
 import xml.etree.ElementTree as ET
 from enum import Enum
 from sys import argv
+from threading import Thread
 
 import gender_guesser.detector as gender
 import numpy as np
@@ -72,7 +72,7 @@ class Corpus:
         self.sentences = []
         self.chunks = []
 
-    def add_xml_file_to_corpus(self, file_name: str):
+    def add_xml_file_to_corpus(self, file_name: str, return_list=False):
         """
         This method will receive a file name, such that the file is an XML file (from the BNC), read the content from
         it and add it to the corpus.
@@ -81,34 +81,39 @@ class Corpus:
         """
         tree = ET.parse(file_name)
         # get author/s
-        authors = []
-        for author in tree.iter(tag='author'):
-            authors.append(author.text)
-
+        authors = [author.text for author in tree.iter(tag='author')]
         if len(authors) == 1 and len(authors[0].split(',')) == 2:
             author_gender = Gender.get_gender(authors[0].split(',')[1].strip())
         else:
             author_gender = Gender.Unknown
 
         # iterate over all sentences in the file and extract the tokens
+        sentences = []
         for sentence in tree.iter(tag='s'):
-            tokens = []
-            for word in sentence:
-                if word.tag in ('w', 'c') and isinstance(word.text, str):
-                    new_token = Token(value=word.text.strip())
-                    tokens.append(new_token)
+            tokens = np.array([Token(value=word.text.strip()) for word in sentence if
+                               word.tag in ('w', 'c') and isinstance(word.text, str)])
 
-            tokens = np.array(tokens)
             new_sentence = Sentence(tokens, authors, author_gender)
-            self.sentences.append(new_sentence)
+            if return_list:
+                sentences.append(new_sentence)
+            else:
+                self.sentences.append(new_sentence)
 
-    def set_sentences_to_np(self):
-        self.sentences = np.array(self.sentences)
+        if return_list:
+            return sentences
+
+    def bulk_add_xml_to_corpus(self, xml_dir, xml_files_names):
+        all_sentences = []
+        for file in xml_files_names:
+            all_sentences.extend(self.add_xml_file_to_corpus(os.path.join(xml_dir, file), return_list=True))
+
+        self.sentences.extend(all_sentences)
 
     def calculate_chunks(self):
+        self.sentences = np.array(self.sentences)
         chunks = []
         sentences_counter = 0
-        while sentences_counter <= len(self.sentences) + 10:
+        while sentences_counter <= self.sentences.size + 10:
             sentences = self.sentences[sentences_counter: sentences_counter + 10]
             chunks.append(Chunk(sentences))
             sentences_counter += 10
@@ -139,38 +144,33 @@ class Classify:
     def classify(self, vector_method):
         # get train data and labels
         print(f'Running classify with method = {vector_method}')
-        chunks = Chunks(np.concatenate([self.male_chunks, self.female_chunks]))
+        print(f'Building input data')
+        chunks = np.concatenate([self.male_chunks, self.female_chunks])
+        np.random.shuffle(chunks)
+        chunks = Chunks(chunks)
         train_data = self.get_data_by_BoW(chunks) if vector_method == 'BoW' else \
             self.get_data_by_personal_vector(chunks)
-
         train_labels = np.array([c.overall_gender.value for c in chunks.chunks])
+
+        print('Calculating cross validation score')
+        n_jobs = 10
+        neigh = KNeighborsClassifier(n_jobs=n_jobs)
+        cross_val_scores_list = cross_val_score(neigh, train_data, train_labels, cv=10, n_jobs=n_jobs)
+
+        print('Train phase')
+        X_train, X_test, y_train, y_test = train_test_split(train_data, train_labels, test_size=0.3, shuffle=True)
+        neigh.fit(X_train, y_train)
+
+        print('Validation phase')
+        predicted = neigh.predict(X_test)
         target_names = ['Male', 'Female']
+        report = classification_report(y_test, predicted, target_names=target_names)
 
-        # model w 10-fold cross-validation
-        print('Running model with Cross validation')
-        neigh_cross_val = KNeighborsClassifier()
-        neigh_cross_val.fit(train_data, train_labels)
-        cross_val_score_list = cross_val_score(neigh_cross_val, train_data, train_labels, cv=10)
-        # todo all data?
-        print('Generating summery')
-        cross_val_predicted = neigh_cross_val.predict(train_data)
-        cross_val_report = classification_report(train_labels, cross_val_predicted, target_names=target_names)
-
-        # model w 70:30 split validation
-        print('Running model with regular split')
-        neigh_split_val = KNeighborsClassifier()
-        X_train, X_test, y_train, y_test = train_test_split(train_data, train_labels, test_size=0.3)
-        neigh_split_val.fit(X_train, y_train)
-        reg_val_score = neigh_split_val.score(X_test, y_test)
-        print('Generating summery')
-        reg_val_predicted = neigh_split_val.predict(train_data)
-        reg_val_report = classification_report(train_labels, reg_val_predicted, target_names=target_names)
-
-        return cross_val_score_list, cross_val_report, reg_val_score, reg_val_report
+        return cross_val_scores_list, report
 
     @staticmethod
     def get_data_by_BoW(chunks):
-        vectorizer = TfidfVectorizer()
+        vectorizer = TfidfVectorizer(max_features=1000)
         data = vectorizer.fit_transform(chunks)
         return data
 
@@ -225,17 +225,31 @@ class Classify:
 
 def main():
     print('Program started')
-    start_time = time.time()
     xml_dir = argv[1]  # directory containing xml files from the BNC corpus, full path
     output_file = argv[2]  # output file name, full path
 
     # 1. Create a corpus from the file in the given directory (up to 1000 XML files from the BNC)
     print('Corpus Building - In Progress...')
     corpus = Corpus()
-    xml_files_names = os.listdir(xml_dir)  # [:48]
-    for file in xml_files_names[:min(len(xml_files_names), 1000)]:
-        corpus.add_xml_file_to_corpus(os.path.join(xml_dir, file))
-    corpus.set_sentences_to_np()
+    xml_files_names = os.listdir(xml_dir)
+    # limit files to 1000
+    xml_files_names = np.array(xml_files_names[:min(len(xml_files_names), 1000)])
+
+    # The corpus building is a bottleneck, so I used threads to accelerate the process
+    num_of_threads = 5 if xml_files_names.size >= 100 else 1
+    thread_work_size = int(xml_files_names.size / num_of_threads)
+    threads = []
+    i = 0
+    while i < xml_files_names.size:
+        thread = Thread(target=corpus.bulk_add_xml_to_corpus,
+                        args=(xml_dir, xml_files_names[i:min(i + thread_work_size, xml_files_names.size)]))
+        thread.start()
+        threads.append(thread)
+        i += thread_work_size
+
+    for thread in threads:
+        thread.join()
+
     corpus.calculate_chunks()
     print('Corpus Building - Done!')
 
@@ -254,10 +268,8 @@ def main():
     vectors_methods = ['BoW', 'Custom Feature Vector']
     for vector_method in vectors_methods:
         output_str += f'== {vector_method} Classification ==\n'
-        cross_val_score_list, cross_val_report, reg_val_score, reg_val_report = classify.classify(vector_method)
-        # todo which one to take?
-        # todo what to do with the val score
-        output_str += f'Cross Validation Accuracy: {cross_val_score_list[-1] * 100:.3f}% \n{cross_val_report}\n\n'
+        cross_val_scores_list, report = classify.classify(vector_method)
+        output_str += f'Cross Validation Accuracy: {np.mean(cross_val_scores_list) * 100:.3f}% \n{report}\n\n'
     print('Classification - Done!')
 
     # 4. Print onto the output file the results from the second task in the wanted format.
@@ -265,8 +277,6 @@ def main():
     with open(output_file, 'w', encoding='utf8') as output_file:
         output_file.write(output_str)
     print(f'Program ended.')
-    minutes, seconds = divmod(time.time() - start_time, 60)
-    print(f'Run time: {int(minutes)}:{int(seconds)} minutes.')
 
 
 if __name__ == '__main__':
